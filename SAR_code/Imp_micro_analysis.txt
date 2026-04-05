@@ -1,0 +1,11 @@
+The "Dark Rendezvous":
+
+Requirement: 1 Image. Find two ships extremely close to each other ( < 500m) in the SAR image where at least one has no AIS signal. This is a strong indicator of illegal cargo transfer.
+
+The "Anchorage Violation":
+
+Requirement: 2 Images (e.g., Day 1 and Day 4). If a "Dark Vessel" (unknown ship) is in the exact same pixel coordinates on Day 1 and Day 4, it is illegally anchored or using a fixed platform.
+
+The "Corridor Violation":
+
+Requirement: 1 Image. Detect a ship inside a "Marine Protected Area" (MPA) or a restricted zone. You don't need to know where it came from; just being there is the violation.

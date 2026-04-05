@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.env
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data
+data/
+Analysis_results/
+AnalysisBrandNew_results/
+AnalysisMicroMacro_results/
+AnalysisNew_results/
+SAR_code/SAR_Data_csv_info/
+
+processed/
+# Models
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
