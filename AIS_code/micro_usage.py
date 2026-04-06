@@ -24,6 +24,8 @@ import os
 import torch
 from .Micro_Analysis import MicroAnalysis
 from .Splitter import auto_split
+from .dataset import AISDataset, collate_fn
+from torch.utils.data import DataLoader
 
 # =====================================================================
 #  CONFIGURATION
@@ -271,6 +273,24 @@ for split_name, stems in [("train", TRAIN_STEMS), ("val", VAL_STEMS), ("test", T
         date_stems=stems,
     )
     print(f"  {split_name} index → {index_path}")
+
+
+# =====================================================================
+#  STEP 4b — Verify Dataset loads correctly
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 4b: Dataset loading smoke test")
+print("=" * 70)
+
+train_index = os.path.join(DATASET_INDEX_DIR, "train_dataset_index.json")
+if os.path.exists(train_index):
+    ds = AISDataset(train_index, split="train")
+    dl = DataLoader(ds, batch_size=4, shuffle=True, collate_fn=collate_fn)
+    batch = next(iter(dl))
+    print(f"  macro shape : {batch['macro'].shape}")   # expect [4, N_cells, 10]
+    print(f"  micro shape : {batch['micro'].shape}")   # expect [4, N_max, 11]
+    print(f"  mask shape  : {batch['mask'].shape}")    # expect [4, N_max]
+    print("  PASSED — DataLoader smoke test OK")
 
 
 # =====================================================================

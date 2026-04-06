@@ -557,15 +557,8 @@ class MicroAnalysis(Analysis):
         if df.is_empty():
             return [], []
 
-        # ── Step 2: add window key (truncated to hour boundary) ──────────
-        df = df.with_columns(
-            pl.col("base_date_time")
-            .dt.truncate(f"{self.window_size_hours}h")
-            .alias("_wk")
-        )
-
-        # ── Step 3: sort by (mmsi, window, time) — needed for delta_t ───
-        df = df.sort(["mmsi", "_wk", "base_date_time"])
+        # ── Step 3: sort by (mmsi, time) — needed for delta_t ───────────
+        df = df.sort(["mmsi", "base_date_time"])
 
         # ── Step 4: compute ALL 11 features on the ENTIRE DataFrame ──────
         #    This runs in Rust on 3M rows — takes seconds, not minutes.
@@ -612,7 +605,7 @@ class MicroAnalysis(Analysis):
             #     the next row's time within the same (mmsi, window).
             (
                 (
-                    pl.col("base_date_time").shift(-1).over(["mmsi", "_wk"])
+                    pl.col("base_date_time").shift(-1).over(["mmsi"])
                     - pl.col("base_date_time")
                 )
                 .dt.total_seconds()
@@ -647,27 +640,21 @@ class MicroAnalysis(Analysis):
 
         grouped = (
             df
-            .group_by(["mmsi", "_wk"], maintain_order=True)
+            .group_by(["mmsi"], maintain_order=True)
             .agg(
                 [pl.col(c) for c in _FCOLS]
                 + [pl.len().alias("_pc")]
             )
-            .filter(pl.col("_pc") >= self.min_pings_per_window)
+            .filter(pl.col("_pc") >= 10)   # min 10 pings per day (v2.0 requirement)
         )
 
         if grouped.is_empty():
             return [], []
 
-        # Extract window hour from the truncated timestamp
-        grouped = grouped.with_columns(
-            pl.col("_wk").dt.hour().cast(pl.Int32).alias("_hr")
-        )
-
         # ── Step 6: convert grouped rows to tensors ──────────────────────
         #    This is still a Python loop, but it's just numpy stacking —
         #    no Polars operations, no DataFrame creation per window.
         mmsi_col  = grouped["mmsi"].to_list()
-        hour_col  = grouped["_hr"].to_list()
         pc_col    = grouped["_pc"].to_list()
         feat_cols = [grouped[c].to_list() for c in _FCOLS]
 
@@ -691,7 +678,6 @@ class MicroAnalysis(Analysis):
             daily_tensors.append(tensor)
             daily_metadata.append({
                 "mmsi":         int(mmsi_col[i]),
-                "window_hour":  int(hour_col[i]),
                 "ping_count":   int(pc_col[i]),
                 "bundle_index": bundle_index,
             })
@@ -916,7 +902,6 @@ class MicroAnalysis(Analysis):
                     "bundle_index": entry["bundle_index"],
                     "mmsi":         entry["mmsi"],
                     "date":         date,
-                    "window_hour":  entry["window_hour"],
                     "ping_count":   entry["ping_count"],
                 })
 

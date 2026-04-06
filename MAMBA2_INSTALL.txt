@@ -1,0 +1,118 @@
+================================================================================
+ Mamba2 Installation Guide — HB-Mamba Project
+ System: Ubuntu 20.04, GLIBC 2.31, CUDA 12.9, 2x RTX 4500 Ada (24GB)
+================================================================================
+
+WHY THIS IS NON-TRIVIAL
+------------------------
+- Ubuntu 20.04 has GLIBC 2.31. All precompiled mamba-ssm wheels require GLIBC 2.32+
+  (built on Ubuntu 22.04). Must build from source.
+- mamba-ssm v2.3.x (main branch) requires torch 2.11.0 + CUDA 13.0 + triton 3.5+.
+  Our system has nvcc 12.9, so v2.3.x is incompatible.
+- mamba-ssm v2.2.6.post3 is the correct version: has Mamba2, no Mamba3, works with
+  torch 2.6.0 + triton 3.2.0.
+- transformers 5.x removed GreedySearchDecoderOnlyOutput. Must pin to <5.0.
+- conda's GCC 14 produces GLIBC 2.32+ linked binaries. Must use system GCC (/usr/bin/gcc).
+
+
+STEP 1 — Create conda env with Python only
+-------------------------------------------
+    conda create -n hb_mamba python=3.10 -y
+    conda activate hb_mamba
+
+
+STEP 2 — Install CUDA toolkit via conda
+-----------------------------------------
+    conda install -c nvidia cuda-toolkit -y
+    # Verify: nvcc --version  (should show 12.x)
+
+
+STEP 3 — Install PyTorch (cu124 wheels work on CUDA 12.x systems)
+-------------------------------------------------------------------
+    pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
+        --index-url https://download.pytorch.org/whl/cu124
+
+    # Verify:
+    python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+    # Expected: 2.6.0+cu124 / True
+
+
+STEP 4 — Install causal-conv1d from source (GLIBC + CUDA fix)
+---------------------------------------------------------------
+    git clone https://github.com/Dao-AILab/causal-conv1d /tmp/causal_conv1d_src
+
+    export CC=/usr/bin/gcc
+    export CXX=/usr/bin/g++
+    export CUDA_HOME=$CONDA_PREFIX
+
+    pip install /tmp/causal_conv1d_src --no-build-isolation --no-cache-dir
+    # Builds from source using system GCC → GLIBC 2.31 compatible binary
+
+
+STEP 5 — Install mamba-ssm v2.2.6.post3 from source
+-----------------------------------------------------
+    git clone https://github.com/state-spaces/mamba /tmp/mamba_src
+    cd /tmp/mamba_src
+    git checkout v2.2.6.post3
+
+    # Must use: system GCC, no build isolation, no cache, no deps
+    # (--no-deps prevents pip from upgrading torch to 2.11.0)
+    export CC=/usr/bin/gcc
+    export CXX=/usr/bin/g++
+    MAMBA_FORCE_BUILD=TRUE pip install . --no-build-isolation --no-cache-dir --no-deps
+
+    cd ~/AIS/SAR_AIS_analysis
+
+
+STEP 6 — Pin transformers to <5.0
+-----------------------------------
+    pip install "transformers>=4.40,<5.0"
+    # transformers 5.x removed GreedySearchDecoderOnlyOutput which mamba-ssm uses
+
+
+STEP 7 — Install remaining project dependencies
+-------------------------------------------------
+    pip install einops accelerate wandb tensorboard rich tqdm \
+                numpy pandas scikit-learn scipy pyyaml matplotlib seaborn \
+                geopandas shapely h5py
+
+
+STEP 8 — Verify Mamba2 works
+------------------------------
+    python -c "
+import torch
+from mamba_ssm.modules.mamba2 import Mamba2
+m = Mamba2(d_model=256, d_state=64, d_conv=4, expand=2).cuda()
+x = torch.randn(1, 100, 256).cuda()
+y = m(x)
+print('Input:', x.shape, 'Output:', y.shape)
+print('Mamba2 ready.')
+"
+    # Expected: Input: torch.Size([1, 100, 256]) Output: torch.Size([1, 100, 256])
+
+
+IMPORT PATH IN MODEL CODE
+--------------------------
+    Use the direct module import (NOT the top-level package):
+
+        from mamba_ssm.modules.mamba2 import Mamba2   # CORRECT
+
+        from mamba_ssm import Mamba2                   # may fail depending on
+                                                       # transformers version
+
+    Both refer to the same class.
+
+
+KEY VERSIONS (working state)
+------------------------------
+    mamba-ssm       : 2.2.6.post3
+    causal-conv1d   : 1.6.1
+    torch           : 2.6.0+cu124
+    triton          : 3.2.0
+    transformers    : 4.x (<5.0)
+    Python          : 3.10
+    CUDA toolkit    : 12.9 (conda nvidia channel)
+    System GCC      : /usr/bin/gcc  (Ubuntu 20.04 default)
+    GLIBC           : 2.31
+
+================================================================================

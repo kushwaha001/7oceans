@@ -1059,10 +1059,26 @@ class MacroAnalysis(Analysis):
                 tqdm.write(f"  [{date_stem}] No features after normalisation — skipping.")
                 continue
 
-            tensor = torch.tensor(feature_rows, dtype=torch.float32)
+            # Build full grid tensor: one row per bbox cell, zeros for empty cells.
+            # N_cells is derived from the grid config, NOT hardcoded.
+            N_cells = len(self.bboxes_list)
+            tensor = torch.zeros(N_cells, 10, dtype=torch.float32)
+
+            # Map each parquet row to its grid index via (bbox_min_lat, bbox_min_lon)
+            # bboxes_list is sorted (-lat, +lon), same order as parquet sort above.
+            bbox_to_idx = {
+                (round(b[0], 6), round(b[1], 6)): i
+                for i, b in enumerate(self.bboxes_list)
+            }
+
+            for feat, r in zip(feature_rows, rows):
+                key = (round(r["bbox_min_lat"], 6), round(r["bbox_min_lon"], 6))
+                cell_idx = bbox_to_idx.get(key)
+                if cell_idx is not None:
+                    tensor[cell_idx] = torch.tensor(feat, dtype=torch.float32)
 
             assert tensor.ndim == 2,              f"Expected 2D tensor, got {tensor.ndim}D"
-            assert tensor.shape[1] == 10,         f"Expected 10 features, got {tensor.shape[1]}"
+            assert tensor.shape == (N_cells, 10), f"Expected ({N_cells}, 10), got {tuple(tensor.shape)}"
             assert not torch.isnan(tensor).any(), f"NaN detected in {date_stem}"
 
             out_path = os.path.abspath(

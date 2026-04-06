@@ -1,3 +1,7 @@
+# Large installers
+*.sh
+Miniconda*.sh
+
 # Python
 __pycache__/
 *.pyc
