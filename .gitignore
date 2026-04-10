@@ -1,43 +1,69 @@
-# Large installers
+# ── Large installers ──────────────────────────────────────────────────────────
 *.sh
 Miniconda*.sh
 
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# Virtual environments
+# ── Virtual environments ──────────────────────────────────────────────────────
 venv/
 .env
 env/
+env.yml
 
-# Jupyter
+# ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
+notebooks/
 
-# Data
+# ── Raw & processed data (never commit large data files) ─────────────────────
 data/
-Analysis_results/
-AnalysisBrandNew_results/
-AnalysisMicroMacro_results/
-AnalysisNew_results/
-SAR_code/SAR_Data_csv_info/
-
+data_genration_and_raw_data/
+AIS_dataset/
+JSON_PARQUET_result/
+Discarded_data/
 processed/
-# Models
+
+# ── Tensor / model checkpoint files ──────────────────────────────────────────
 *.pt
 *.pth
 *.ckpt
 *.h5
+*.safetensors
 
-# Logs
+# ── Old / discarded code ──────────────────────────────────────────────────────
+Discarded_AIS_code/
+AIS_code/
+home/
+
+# ── Scratch / temp files ─────────────────────────────────────────────────────
+rought.py
+test.py
+inspectpt.py
+detection_count.py
+*.tmp
+
+# ── Logs & experiment outputs ─────────────────────────────────────────────────
 logs/
 *.log
+experiments/
+Analysis_results/
+AnalysisBrandNew_results/
+AnalysisMicroMacro_results/
+AnalysisNew_results/
 
-# OS files
+# ── SAR data ──────────────────────────────────────────────────────────────────
+SAR_code/SAR_Data_csv_info/
+
+# ── Office lock files ─────────────────────────────────────────────────────────
+.~lock.*
+
+# ── OS files ──────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# IDE
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
