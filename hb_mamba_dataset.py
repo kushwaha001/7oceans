@@ -77,6 +77,7 @@ class GapMaskConfig:
 # ---------------------------------------------------------------------------
 
 class HBMambaDataset(Dataset):
+    
     """
     PyTorch Dataset for HB-Mamba v2.0 vessel trajectory learning.
 

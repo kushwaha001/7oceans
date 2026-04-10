@@ -15,7 +15,8 @@ Demonstrates:
     7.  Verifying macro cache hit behaviour
     8.  Custom GapMaskConfig usage
     9.  Timing one epoch of the train loader
-"""
+
+    """
 
 import os
 import sys
@@ -306,7 +307,69 @@ print(f"  Samples processed   : {samples_done}")
 print(f"  Wall time           : {elapsed:.2f}s")
 print(f"  Throughput          : {samples_done / elapsed:.0f} samples/s")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 9b — Bottleneck diagnosis
+# ─────────────────────────────────────────────────────────────────────────────
+print(f"\n{SEP}")
+print("SECTION 9b — Bottleneck diagnosis")
+print(SEP)
 
+import time
+
+# Test 1: pure __getitem__ speed (no DataLoader overhead, no workers)
+t0 = time.perf_counter()
+for i in range(200):
+    _ = train_ds[i]
+getitem_time = time.perf_counter() - t0
+print(f"  Pure __getitem__ (200 samples, cache_micro=False) : {getitem_time:.2f}s  →  {200/getitem_time:.0f} samples/s")
+
+# Test 2: same but with cache_micro=True
+cached_micro_ds = HBMambaDataset(
+    dataset_index_path = str(DATASET_INDEX_DIR / "train_dataset_index.json"),
+    norm_stats_path    = str(NORM_STATS_PATH),
+    split              = "train",
+    gap_config         = GapMaskConfig(),
+    cache_macro        = True,
+    cache_micro        = True,   # <── difference
+)
+t0 = time.perf_counter()
+for i in range(200):
+    _ = cached_micro_ds[i]
+cached_time = time.perf_counter() - t0
+print(f"  Pure __getitem__ (200 samples, cache_micro=True)  : {cached_time:.2f}s  →  {200/cached_time:.0f} samples/s")
+
+# Test 3: how many unique micro bundle files are accessed in 200 samples?
+bundle_paths = {train_ds.pairs[i]["micro_bundle"] for i in range(200)}
+print(f"  Unique micro bundles in first 200 samples : {len(bundle_paths)}")
+
+# Test 4: how large is one micro bundle file on disk?
+import os
+bundle_sizes = [os.path.getsize(p) / 1024 / 1024 for p in list(bundle_paths)[:5]]
+print(f"  First 5 micro bundle sizes (MB): {[f'{s:.1f}' for s in bundle_sizes]}")
+
+# Test 5: raw torch.load speed for one bundle
+sample_bundle_path = train_ds.pairs[0]["micro_bundle"]
+t0 = time.perf_counter()
+for _ in range(20):
+    _ = torch.load(sample_bundle_path, map_location="cpu", weights_only=False)
+load_time = (time.perf_counter() - t0) / 20
+print(f"  Raw torch.load for one micro bundle (avg 20 runs) : {load_time*1000:.1f}ms")
+
+# Test 6: DataLoader with 0 workers vs 4 workers
+for nw in [0, 2, 4, 8]:
+    tl = build_dataloaders(
+        dataset_index_dir = str(DATASET_INDEX_DIR),
+        norm_stats_path   = str(NORM_STATS_PATH),
+        batch_size        = 32,
+        num_workers       = nw,
+        pin_memory        = False,
+    )["train"]
+    t0 = time.perf_counter()
+    for step, b in enumerate(tl):
+        if step + 1 >= 50:
+            break
+    elapsed = time.perf_counter() - t0
+    print(f"  num_workers={nw:2d}  50 batches × 32  →  {50*32/elapsed:.0f} samples/s")
 # ─────────────────────────────────────────────────────────────────────────────
 # Done
 # ─────────────────────────────────────────────────────────────────────────────
