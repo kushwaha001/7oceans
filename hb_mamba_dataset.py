@@ -170,9 +170,21 @@ class HBMambaDataset(Dataset):
         return data
 
     # -----------------------------------------------------------------------
-    def _apply_gap_mask(self, n_day: int) -> tuple[torch.BoolTensor, str]:
+    def _apply_gap_mask(
+        self, n_day: int, seed: int | None = None
+    ) -> tuple[torch.BoolTensor, str]:
         """
         Sample a random contiguous gap and return the boolean mask and type.
+
+        Parameters
+        ----------
+        n_day : int
+            Length of the trajectory.
+        seed : int | None
+            If provided the gap is deterministic — same seed always produces
+            the same gap.  Pass ``idx`` from ``__getitem__`` for validation /
+            test splits so every epoch evaluates on the same gaps.
+            Leave None for training (fresh random gap each epoch).
 
         Returns
         -------
@@ -183,15 +195,17 @@ class HBMambaDataset(Dataset):
         """
         cfg = self.gap_config
 
+        rng = random.Random(seed)   # seeded local RNG; does not affect global state
+
         # Compute gap length
         gap_len = max(cfg.min_gap_len,
-                      int(n_day * random.uniform(cfg.min_gap_frac, cfg.max_gap_frac)))
+                      int(n_day * rng.uniform(cfg.min_gap_frac, cfg.max_gap_frac)))
         gap_len = min(gap_len, n_day - 2)  # always keep ≥ 2 visible pings
 
         # Decide gap type and position
-        if random.random() < cfg.interp_prob:
+        if rng.random() < cfg.interp_prob:
             gap_type  = "interpolation"
-            gap_start = random.randint(1, n_day - gap_len - 1)
+            gap_start = rng.randint(1, n_day - gap_len - 1)
         else:
             gap_type  = "extrapolation"
             gap_start = n_day - gap_len
@@ -233,7 +247,11 @@ class HBMambaDataset(Dataset):
         n_day = micro_tokens.shape[0]
 
         # ── Gap masking ──────────────────────────────────────────────────────
-        mask, gap_type = self._apply_gap_mask(n_day)
+        # Training: fresh random gap each epoch (seed=None).
+        # Val / test: deterministic gap seeded by sample index so every epoch
+        # evaluates on the same gap positions (architecture doc Section 9.2).
+        seed = None if self.split == "train" else idx
+        mask, gap_type = self._apply_gap_mask(n_day, seed=seed)
 
         return {
             "macro_features": macro_features,
