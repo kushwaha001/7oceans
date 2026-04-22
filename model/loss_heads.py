@@ -49,12 +49,101 @@ Target features (first 8 of 11 micro_tokens):
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def compute_linear_interp_baseline(
+    micro_tokens : Tensor,   # [B, N, D]  D>=2 (first 2 = lat, lon)
+    mask         : Tensor,   # [B, N]  bool  True = masked (gap to predict)
+    padding_mask : Tensor,   # [B, N]  bool  True = padded (not a real ping)
+) -> Tensor:
+    """
+    Per-position lat/lon anchor built from the nearest visible neighbours.
+
+    For every position t we find:
+        prev = max index i <= t with visible[i]  (or -1 if none)
+        next = min index j >= t with visible[j]  (or INF if none)
+    where visible = ~mask & ~padding_mask.
+
+    Baseline at position t:
+        both anchors   → linear interp by index fraction
+        only prev      → lat/lon of prev (flat forward extrapolation)
+        only next      → lat/lon of next (flat backward extrapolation)
+        neither        → 0.5 (mid of normalised range, only hit by fully-empty sequences)
+
+    The model predicts lat/lon as `baseline + delta`, so the target delta is
+    `(actual - baseline)` which is small for smooth trajectories.  This breaks
+    the mean-collapse failure mode where the network was outputting a global
+    average regardless of the surrounding context.
+
+    Returns
+    -------
+    [B, N, 2]  fp32 baseline lat/lon.
+    """
+    B, N, _ = micro_tokens.shape
+    device  = micro_tokens.device
+
+    visible = (~mask) & (~padding_mask)                       # [B, N]
+
+    lat = micro_tokens[..., 0].float()                         # [B, N]
+    lon = micro_tokens[..., 1].float()
+
+    pos  = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)   # [B, N]
+    INF  = N   # sentinel "no successor"
+
+    # Predecessor: running MAX of (pos if visible else -1) along N
+    prev_src      = torch.where(visible, pos, torch.full_like(pos, -1))
+    prev_idx, _   = prev_src.cummax(dim=1)                   # [B, N]
+
+    # Successor: running MIN of (pos if visible else INF) from the right.
+    # Implement as reverse-cummax of (INF - src), then flip back.
+    succ_src      = torch.where(visible, pos, torch.full_like(pos, INF))
+    neg           = INF - succ_src
+    run_max, _    = neg.flip(dims=[1]).cummax(dim=1)
+    run_max       = run_max.flip(dims=[1])
+    succ_idx      = INF - run_max                             # [B, N]; INF if no successor
+
+    has_prev = prev_idx >= 0
+    has_succ = succ_idx < INF
+    both     = has_prev & has_succ
+    only_p   = has_prev & (~has_succ)
+    only_s   = (~has_prev) & has_succ
+
+    prev_safe = prev_idx.clamp(min=0)
+    succ_safe = succ_idx.clamp(max=N - 1)
+
+    lat_prev = torch.gather(lat, 1, prev_safe)
+    lat_succ = torch.gather(lat, 1, succ_safe)
+    lon_prev = torch.gather(lon, 1, prev_safe)
+    lon_succ = torch.gather(lon, 1, succ_safe)
+
+    denom = (succ_safe - prev_safe).clamp(min=1).float()
+    frac  = (pos - prev_safe).float() / denom                 # 0 at prev, 1 at succ
+
+    lat_base = torch.full_like(lat, 0.5)
+    lon_base = torch.full_like(lon, 0.5)
+
+    lat_interp = lat_prev + (lat_succ - lat_prev) * frac
+    lon_interp = lon_prev + (lon_succ - lon_prev) * frac
+
+    lat_base = torch.where(both,   lat_interp, lat_base)
+    lat_base = torch.where(only_p, lat_prev,   lat_base)
+    lat_base = torch.where(only_s, lat_succ,   lat_base)
+
+    lon_base = torch.where(both,   lon_interp, lon_base)
+    lon_base = torch.where(only_p, lon_prev,   lon_base)
+    lon_base = torch.where(only_s, lon_succ,   lon_base)
+
+    return torch.stack([lat_base, lon_base], dim=-1)          # [B, N, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -82,18 +171,32 @@ class ReconstructionHead(nn.Module):
             nn.Linear(d_model, n_features),
         )
 
-    def forward(self, h_fwd: Tensor, h_bwd: Tensor) -> Tensor:
+    def forward(
+        self,
+        h_fwd           : Tensor,
+        h_bwd           : Tensor,
+        baseline_latlon : Optional[Tensor] = None,   # [B, N_day, 2]
+    ) -> Tensor:
         """
         Parameters
         ----------
-        h_fwd : [B, N_day, d_model]
-        h_bwd : [B, N_day, d_model]
+        h_fwd           : [B, N_day, d_model]
+        h_bwd           : [B, N_day, d_model]
+        baseline_latlon : [B, N_day, 2]  optional linear-interp baseline.
+                          When provided, the first 2 output channels are
+                          interpreted as deltas: pred_latlon = baseline + delta.
+                          When None, the head returns absolute values (legacy).
 
         Returns
         -------
-        [B, N_day, n_features]
+        [B, N_day, n_features]   — final (absolute) feature prediction.
         """
-        return self.mlp(torch.cat([h_fwd, h_bwd], dim=-1))
+        raw = self.mlp(torch.cat([h_fwd, h_bwd], dim=-1))
+        if baseline_latlon is None:
+            return raw
+        # delta head for lat/lon only; other features stay absolute.
+        latlon = baseline_latlon.to(raw.dtype) + raw[..., :2]
+        return torch.cat([latlon, raw[..., 2:]], dim=-1)
 
 
 class NextPingHead(nn.Module):
@@ -103,6 +206,10 @@ class NextPingHead(nn.Module):
     Uses h_fwd only (causal — the forward pass sees only past context).
     Prediction at position t is the target at position t+1.
 
+    v2.1 change: a decoupling adapter (Linear) sits between h_fwd and the
+    MLP so that L_next gradients do not force h_fwd to encode t+1 information
+    directly (Fix 4).
+
     Parameters
     ----------
     d_model    : int   Model dimension (256).
@@ -111,6 +218,7 @@ class NextPingHead(nn.Module):
 
     def __init__(self, d_model: int = 256, n_features: int = 8) -> None:
         super().__init__()
+        self.adapter = nn.Linear(d_model, d_model)   # v2.1 Fix 4: decoupling adapter
         self.mlp = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
@@ -127,7 +235,7 @@ class NextPingHead(nn.Module):
         -------
         [B, N_day, n_features]   — shift by 1 and apply mask in loss computation
         """
-        return self.mlp(h_fwd)
+        return self.mlp(self.adapter(h_fwd))   # adapter absorbs t+1 bias
 
 
 class ContrastiveHead(nn.Module):
@@ -217,8 +325,8 @@ class LossHeads(nn.Module):
     """
     Combined loss module — wraps all four heads and computes the weighted sum.
 
-    Combined loss:
-        L = 1.0·L_mask + 0.8·L_next + 0.5·L_contrast + 0.5·L_align
+    Combined loss (v2.1):
+        L = 1.0·L_mask + 0.3·L_next + 0.5·L_contrast + 0.5·L_align
 
     Parameters
     ----------
@@ -227,7 +335,7 @@ class LossHeads(nn.Module):
     n_features : int    Number of target micro features (8 = lat,lon,sog,...,delta_t).
     tau        : float  NT-Xent temperature (0.07).
     w_mask     : float  Weight for L_mask  (1.0).
-    w_next     : float  Weight for L_next  (0.8).
+    w_next     : float  Weight for L_next  (0.3, was 0.8 in v2.0).
     w_contrast : float  Weight for L_contrast (0.5).
     w_align    : float  Weight for L_align (0.5).
     """
@@ -239,7 +347,7 @@ class LossHeads(nn.Module):
         n_features : int   = 8,
         tau        : float = 0.07,
         w_mask     : float = 1.0,
-        w_next     : float = 0.8,
+        w_next     : float = 0.3,    # v2.1: reduced from 0.8 to reduce conflict with L_mask
         w_contrast : float = 0.5,
         w_align    : float = 0.5,
     ) -> None:
@@ -259,7 +367,23 @@ class LossHeads(nn.Module):
         self.contrast_head = ContrastiveHead(d_model=d_model,    d_proj=d_proj)
         self.align_head    = AlignmentHead(d_model=d_model,      d_proj=d_proj)
 
-        self.huber = nn.HuberLoss(reduction="mean")
+        # v2.2: feature-weighted Huber. Features order:
+        #   [lat, lon, sog, cog_sin, cog_cos, hdg_sin, hdg_cos, delta_t]
+        # lat/lon weighted 5x (what gap-filling actually cares about),
+        # sog 1x, cog/hdg/delta_t 0.3x (high aleatoric noise — they cap the loss floor
+        # and waste capacity when weighted equally).
+        feat_w = torch.tensor([5.0, 5.0, 1.0, 0.3, 0.3, 0.3, 0.3, 0.3])
+        self.register_buffer("feature_weights", feat_w)
+
+    def _weighted_huber(self, pred: Tensor, target: Tensor) -> Tensor:
+        """
+        Per-element Huber, feature-weighted, then mean over (positions × features).
+
+        pred, target : [..., n_features]
+        """
+        per_elem = F.huber_loss(pred, target, reduction="none")     # [..., n_features]
+        weighted = per_elem * self.feature_weights                  # broadcast on last dim
+        return weighted.mean()
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
@@ -372,11 +496,21 @@ class LossHeads(nn.Module):
         """
         target = micro_tokens[:, :, :self.n_features]   # [B, N_day, 8]
 
+        # v2.3 delta head: build a per-position linear-interp anchor from the
+        # visible (non-masked, non-padded) lat/lon. The recon head then only
+        # has to predict the residual (actual - baseline), which kills the
+        # mean-collapse failure mode — the network can't get away with
+        # outputting a global average because the baseline already contains
+        # the local context.
+        baseline_latlon = compute_linear_interp_baseline(
+            micro_tokens, mask, padding_mask
+        )   # [B, N_day, 2]
+
         # ── Head 1 — Gap reconstruction ───────────────────────────────────
-        y_hat_mask = self.recon_head(h_fwd, h_bwd)      # [B, N_day, 8]
+        y_hat_mask = self.recon_head(h_fwd, h_bwd, baseline_latlon)   # [B, N_day, 8]
         active     = mask & ~padding_mask                # [B, N_day]
         if active.any():
-            L_mask = self.huber(y_hat_mask[active], target[active])
+            L_mask = self._weighted_huber(y_hat_mask[active], target[active])
         else:
             L_mask = torch.zeros(1, device=h_fwd.device).squeeze()
 
@@ -386,7 +520,7 @@ class LossHeads(nn.Module):
         # Valid only where both t and t+1 are real pings
         next_active = ~padding_mask[:, :-1] & ~padding_mask[:, 1:]
         if next_active.any():
-            L_next = self.huber(y_hat_next[next_active], target_next[next_active])
+            L_next = self._weighted_huber(y_hat_next[next_active], target_next[next_active])
         else:
             L_next = torch.zeros(1, device=h_fwd.device).squeeze()
 
@@ -394,11 +528,24 @@ class LossHeads(nn.Module):
         z          = self.contrast_head(H)               # [B, 128]
         L_contrast = self._nt_xent(z, mmsi)
 
-        # ── Head 4 — Cross-scale alignment ────────────────────────────────
+        # ── Head 4 — Cross-scale alignment (cross-modal InfoNCE) ─────────
+        # v2.2: replaced pure cosine-distance loss (which trivially mode-collapsed
+        # to a shared constant direction) with a symmetric InfoNCE between vessel_Z
+        # and H. Positive: (z_i, h_i) — same vessel. Negatives: all off-diagonal
+        # pairs within the batch. Can't collapse because collapse → every off-diag
+        # logit matches the diagonal → cross-entropy blows up.
         vessel_Z         = self._build_vessel_Z(
                                attn_weights, topk_idx, macro_output, padding_mask)
-        z_prime, h_prime = self.align_head(vessel_Z, H)  # [B, 128] each
-        L_align          = (1.0 - (z_prime * h_prime).sum(dim=-1)).mean()
+        z_prime, h_prime = self.align_head(vessel_Z, H)  # [B, d_proj] each, L2-normed
+        B_a              = z_prime.shape[0]
+        if B_a > 1:
+            logits_zh = torch.mm(h_prime, z_prime.T) / self.tau   # [B, B]
+            labels    = torch.arange(B_a, device=logits_zh.device)
+            L_align   = (F.cross_entropy(logits_zh,      labels)
+                       + F.cross_entropy(logits_zh.T,    labels)) * 0.5
+        else:
+            # Single-sample batch — no negatives. Fall back to cosine distance.
+            L_align = (1.0 - (z_prime * h_prime).sum(dim=-1)).mean()
 
         # ── Combined loss ─────────────────────────────────────────────────
         L_total = (self.w_mask     * L_mask

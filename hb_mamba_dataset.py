@@ -67,7 +67,7 @@ class GapMaskConfig:
         Hard lower bound — never mask fewer than this many pings.
     """
     min_gap_frac: float = 0.05
-    max_gap_frac: float = 0.40
+    max_gap_frac: float = 0.25   # v2.2: reduced from 0.40 — 40% gaps are unlearnable
     interp_prob:  float = 0.70
     min_gap_len:  int   = 2
 
@@ -253,16 +253,49 @@ class HBMambaDataset(Dataset):
         seed = None if self.split == "train" else idx
         mask, gap_type = self._apply_gap_mask(n_day, seed=seed)
 
+        # ── Build masked micro_tokens (v2.1) ────────────────────────────────
+        # micro_tokens_masked: gap positions have dynamic features (0-7) zeroed,
+        # but static features (8-10) preserved from nearest visible ping.
+        micro_tokens_masked = micro_tokens.clone()
+
+        # Step 1: Zero dynamic features (0-6) at gap positions.
+        # v2.2: delta_t (feature 7) is PRESERVED so every masked ping retains
+        # its temporal identity — otherwise mid-gap pings are indistinguishable
+        # and the model collapses to mean regression.
+        micro_tokens_masked[mask, :7] = 0.0
+
+        # Step 2: Preserve static features (8-10) at gap positions
+        gap_positions = mask.nonzero(as_tuple=True)[0]
+        if len(gap_positions) > 0:
+            gap_start = int(gap_positions[0])
+            visible_before = (~mask[:gap_start]).nonzero(as_tuple=True)[0]
+            if len(visible_before) > 0:
+                ref_idx = int(visible_before[-1])
+            else:
+                # No visible ping before gap — use first visible ping anywhere
+                ref_idx = int((~mask).nonzero(as_tuple=True)[0][0])
+            micro_tokens_masked[mask, 8:] = micro_tokens[ref_idx, 8:]
+
+            # Step 3: Fix delta_t at the last visible ping before the gap
+            if len(visible_before) > 0:
+                last_vis = int(visible_before[-1])
+                gap_len = int(gap_positions[-1]) - int(gap_positions[0]) + 1
+                vis_mask_bool = ~mask
+                vis_delta_t = micro_tokens[vis_mask_bool, 7]
+                mean_delta_t = vis_delta_t.mean().item() if len(vis_delta_t) > 0 else 0.0
+                micro_tokens_masked[last_vis, 7] = min(mean_delta_t * gap_len, 1.0)
+
         return {
-            "macro_features": macro_features,
-            "macro_lat_idx":  macro_lat_idx,
-            "macro_lon_idx":  macro_lon_idx,
-            "micro_tokens":   micro_tokens,
-            "mask":           mask,
-            "gap_type":       gap_type,
-            "mmsi":           int(pair["mmsi"]),
-            "date":           pair["date"],
-            "n_day":          n_day,
+            "macro_features":      macro_features,
+            "macro_lat_idx":       macro_lat_idx,
+            "macro_lon_idx":       macro_lon_idx,
+            "micro_tokens":        micro_tokens,            # FULL original — loss TARGET
+            "micro_tokens_masked": micro_tokens_masked,     # Gap zeroed — encoder INPUT
+            "mask":                mask,
+            "gap_type":            gap_type,
+            "mmsi":                int(pair["mmsi"]),
+            "date":                pair["date"],
+            "n_day":               n_day,
         }
 
 
@@ -306,9 +339,10 @@ def hb_mamba_collate_fn(batch: List[Dict]) -> Dict:
     feat_dim  = batch[0]["micro_tokens"].shape[1]   # 11
     n_cells   = batch[0]["macro_features"].shape[0]
 
-    micro_tokens_padded  = torch.zeros(B, max_n_day, feat_dim,  dtype=torch.float32)
-    mask_padded          = torch.zeros(B, max_n_day,             dtype=torch.bool)
-    padding_mask         = torch.ones( B, max_n_day,             dtype=torch.bool)   # default: all padded
+    micro_tokens_padded        = torch.zeros(B, max_n_day, feat_dim,  dtype=torch.float32)
+    micro_tokens_masked_padded = torch.zeros(B, max_n_day, feat_dim,  dtype=torch.float32)
+    mask_padded                = torch.zeros(B, max_n_day,             dtype=torch.bool)
+    padding_mask               = torch.ones( B, max_n_day,             dtype=torch.bool)   # default: all padded
 
     macro_features_list: List[Tensor] = []
     macro_lat_idx_list:  List[Tensor] = []
@@ -321,9 +355,10 @@ def hb_mamba_collate_fn(batch: List[Dict]) -> Dict:
     for i, item in enumerate(batch):
         nd = item["n_day"]
 
-        micro_tokens_padded[i, :nd, :]  = item["micro_tokens"]
-        mask_padded[i, :nd]             = item["mask"]
-        padding_mask[i, :nd]            = False  # real data positions → not padded
+        micro_tokens_padded[i, :nd, :]        = item["micro_tokens"]
+        micro_tokens_masked_padded[i, :nd, :] = item["micro_tokens_masked"]
+        mask_padded[i, :nd]                   = item["mask"]
+        padding_mask[i, :nd]                  = False  # real data positions → not padded
 
         macro_features_list.append(item["macro_features"])
         macro_lat_idx_list.append(item["macro_lat_idx"])
@@ -340,16 +375,17 @@ def hb_mamba_collate_fn(batch: List[Dict]) -> Dict:
     )
 
     return {
-        "macro_features": torch.stack(macro_features_list, dim=0),   # [B, N_cells, 10]
-        "macro_lat_idx":  torch.stack(macro_lat_idx_list,  dim=0),   # [B, N_cells]
-        "macro_lon_idx":  torch.stack(macro_lon_idx_list,  dim=0),   # [B, N_cells]
-        "micro_tokens":   micro_tokens_padded,                        # [B, max_n_day, 11]
-        "mask":           mask_padded,                                 # [B, max_n_day]
-        "padding_mask":   padding_mask,                                # [B, max_n_day]
-        "n_day":          torch.tensor(n_day_list, dtype=torch.long), # [B]
-        "mmsi":           mmsi_list,
-        "date":           date_list,
-        "gap_type":       gap_type_list,
+        "macro_features":      torch.stack(macro_features_list, dim=0),   # [B, N_cells, 10]
+        "macro_lat_idx":       torch.stack(macro_lat_idx_list,  dim=0),   # [B, N_cells]
+        "macro_lon_idx":       torch.stack(macro_lon_idx_list,  dim=0),   # [B, N_cells]
+        "micro_tokens":        micro_tokens_padded,                        # [B, max_n_day, 11]
+        "micro_tokens_masked": micro_tokens_masked_padded,                 # [B, max_n_day, 11]
+        "mask":                mask_padded,                                 # [B, max_n_day]
+        "padding_mask":        padding_mask,                                # [B, max_n_day]
+        "n_day":               torch.tensor(n_day_list, dtype=torch.long), # [B]
+        "mmsi":                mmsi_list,
+        "date":                date_list,
+        "gap_type":            gap_type_list,
     }
 
 

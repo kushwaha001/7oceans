@@ -1,0 +1,158 @@
+========================================================================
+HB-MAMBA GAP PREDICTION DIAGNOSTICS  —  best
+========================================================================
+
+HOW TO READ THIS REPORT
+----------------------------------------
+Each sample = one vessel × one 24-hour AIS window.
+Model predicts all gap pings simultaneously (BERT-style, not autoregressive).
+Baseline = linear interpolation between last visible before gap and
+           first visible after gap (dumb straight-line fill).
+improvement_ratio < 1.0  means model beats the baseline.
+improvement_ratio > 1.0  means baseline beats the model (bad).
+
+GLOBAL SUMMARY
+----------------------------------------
+  samples evaluated       : 6
+  total gap pings         : 947
+  model  mean  err km     : 143.74
+  model  median err km    : 113.88
+  model  max   err km     : 569.74
+  model  std   err km     : 102.41
+  linear mean  err km     : 22.42  (baseline)
+  linear median err km    : 16.84  (baseline)
+  model beats linear      : 0.0% of pings
+  overall improvement     : 6.413x  (< 1.0 = model better)
+
+ERROR DISTRIBUTION
+----------------------------------------
+  p10  model=  58.37 km   linear=   1.27 km
+  p25  model=  77.15 km   linear=   6.30 km
+  p50  model= 113.88 km   linear=  16.84 km
+  p75  model= 160.24 km   linear=  37.18 km
+  p90  model= 340.79 km   linear=  52.53 km
+  p95  model= 382.13 km   linear=  56.76 km
+  p99  model= 440.28 km   linear=  66.11 km
+
+PER-SAMPLE BREAKDOWN
+----------------------------------------
+  #  MMSI         date          n_day  n_gap  gap% type    model_mean  model_med  model_max  linear_mean  improv  beats%
+-------------------------------------------------------------------------------------------------------------------------
+  1  319478000    2022-01-24       74     19   26% inter       448.07     444.17     569.74         1.41 318.699    0.0%
+  2  273291380    2022-01-25     1221    474   39% inter       115.29     112.47     231.83        31.81   3.624    0.0%
+  3  369109000    2022-01-23      137     56   41% inter       369.42     383.51     424.96         0.70 528.019    0.0%
+  4  248647000    2022-01-24      230     67   29% extra       336.99     337.49     374.78        45.16   7.462    0.0%
+  5  477915900    2022-01-22      656    228   35% inter        67.12      66.60     139.42         9.32   7.198    0.0%
+  6  215573000    2022-01-25      338    103   30% inter       139.78     137.70     310.74         9.05  15.445    0.0%
+
+WORST SAMPLES (sorted by model_mean_km descending)
+----------------------------------------
+
+  sample_id=1  MMSI=319478000  date=2022-01-24
+    n_day=74  n_gap=19  gap_frac=0.26  type=interpolation
+    total_path=585.0 km  gap_chord=15.5 km
+    model  : mean=448.07 km  median=444.17 km  max=569.74 km
+    linear : mean=1.41 km  median=1.16 km
+    beats linear 0.0% of gap pings
+    worst ping: idx=53  frac_through_gap=0.06  err=569.74 km
+    anchor before: (23.5390, -83.0730)
+    anchor after : (23.5062, -82.9252)
+    first 5 gap pings (actual | predicted | linear | model_err | linear_err):
+      [0] actual=(23.5380,-83.0684) pred=(26.9618,-86.6967) linear=(23.5374,-83.0656) model=527.28km  linear=0.29km
+      [1] actual=(23.5368,-83.0634) pred=(27.1266,-87.1097) linear=(23.5357,-83.0582) model=569.74km  linear=0.54km
+      [2] actual=(23.5357,-83.0588) pred=(26.6873,-86.8343) linear=(23.5341,-83.0508) model=516.95km  linear=0.84km
+      [3] actual=(23.5344,-83.0529) pred=(26.6324,-86.7655) linear=(23.5325,-83.0434) model=508.32km  linear=1.00km
+      [4] actual=(23.5334,-83.0483) pred=(26.4676,-86.4214) linear=(23.5308,-83.0360) model=471.12km  linear=1.29km
+
+  sample_id=3  MMSI=369109000  date=2022-01-23
+    n_day=137  n_gap=56  gap_frac=0.41  type=interpolation
+    total_path=504.5 km  gap_chord=27.1 km
+    model  : mean=369.42 km  median=383.51 km  max=424.96 km
+    linear : mean=0.70 km  median=0.73 km
+    beats linear 0.0% of gap pings
+    worst ping: idx=59  frac_through_gap=1.00  err=424.96 km
+    anchor before: (24.2734, -82.3806)
+    anchor after : (24.2501, -82.6472)
+    first 5 gap pings (actual | predicted | linear | model_err | linear_err):
+      [0] actual=(24.2730,-82.3853) pred=(27.5110,-80.4330) linear=(24.2730,-82.3853) model=409.58km  linear=0.01km
+      [1] actual=(24.2727,-82.3894) pred=(27.3462,-80.4330) linear=(24.2726,-82.3900) model=393.88km  linear=0.06km
+      [2] actual=(24.2724,-82.3935) pred=(26.9069,-81.1213) linear=(24.2722,-82.3946) model=319.52km  linear=0.12km
+      [3] actual=(24.2720,-82.3977) pred=(26.4676,-82.1538) linear=(24.2718,-82.3993) model=245.36km  linear=0.17km
+      [4] actual=(24.2717,-82.4017) pred=(26.1930,-83.1863) linear=(24.2714,-82.4040) model=227.75km  linear=0.23km
+
+  sample_id=4  MMSI=248647000  date=2022-01-24
+    n_day=230  n_gap=67  gap_frac=0.29  type=extrapolation
+    total_path=470.3 km  gap_chord=200.4 km
+    model  : mean=336.99 km  median=337.49 km  max=374.78 km
+    linear : mean=45.16 km  median=52.96 km
+    beats linear 0.0% of gap pings
+    worst ping: idx=229  frac_through_gap=1.00  err=374.78 km
+    anchor before: (23.7198, -83.8181)
+    anchor after : (24.5127, -85.5917)
+    first 5 gap pings (actual | predicted | linear | model_err | linear_err):
+      [0] actual=(23.7203,-83.8519) pred=(26.0283,-81.8785) linear=(23.7315,-83.8442) model=324.79km  linear=1.47km
+      [1] actual=(23.7233,-83.8937) pred=(26.0283,-81.7408) linear=(23.7431,-83.8702) model=335.93km  linear=3.25km
+      [2] actual=(23.7427,-83.9903) pred=(25.7537,-81.8096) linear=(23.7548,-83.8963) model=313.82km  linear=9.66km
+      [3] actual=(23.7600,-84.0648) pred=(25.7537,-82.0850) linear=(23.7665,-83.9224) model=298.50km  linear=14.51km
+      [4] actual=(23.7678,-84.0963) pred=(25.8087,-82.2226) linear=(23.7781,-83.9485) model=295.41km  linear=15.08km
+
+  sample_id=6  MMSI=215573000  date=2022-01-25
+    n_day=338  n_gap=103  gap_frac=0.30  type=interpolation
+    total_path=414.9 km  gap_chord=121.9 km
+    model  : mean=139.78 km  median=137.70 km  max=310.74 km
+    linear : mean=9.05 km  median=8.87 km
+    beats linear 0.0% of gap pings
+    worst ping: idx=234  frac_through_gap=0.00  err=310.74 km
+    anchor before: (23.7170, -81.6265)
+    anchor after : (24.1959, -80.5473)
+    first 5 gap pings (actual | predicted | linear | model_err | linear_err):
+      [0] actual=(23.7168,-81.6177) pred=(25.0948,-84.2876) linear=(23.7216,-81.6162) model=310.74km  linear=0.56km
+      [1] actual=(23.7165,-81.6068) pred=(25.0399,-83.8746) linear=(23.7262,-81.6058) model=272.77km  linear=1.09km
+      [2] actual=(23.7163,-81.6004) pred=(24.6555,-83.3239) linear=(23.7308,-81.5954) model=203.64km  linear=1.69km
+      [3] actual=(23.7159,-81.5873) pred=(24.6005,-82.8421) linear=(23.7354,-81.5850) model=160.88km  linear=2.18km
+      [4] actual=(23.7156,-81.5783) pred=(24.6555,-82.5668) linear=(23.7400,-81.5746) model=144.83km  linear=2.74km
+
+  sample_id=2  MMSI=273291380  date=2022-01-25
+    n_day=1221  n_gap=474  gap_frac=0.39  type=interpolation
+    total_path=580.3 km  gap_chord=224.0 km
+    model  : mean=115.29 km  median=112.47 km  max=231.83 km
+    linear : mean=31.81 km  median=32.03 km
+    beats linear 0.0% of gap pings
+    worst ping: idx=1147  frac_through_gap=1.00  err=231.83 km
+    anchor before: (28.3849, -95.7282)
+    anchor after : (26.6893, -96.9547)
+    first 5 gap pings (actual | predicted | linear | model_err | linear_err):
+      [0] actual=(28.3825,-95.7323) pred=(28.8838,-95.9631) linear=(28.3814,-95.7308) model=60.13km  linear=0.20km
+      [1] actual=(28.3800,-95.7366) pred=(28.8838,-96.0320) linear=(28.3778,-95.7334) model=63.00km  linear=0.40km
+      [2] actual=(28.3786,-95.7390) pred=(28.7191,-96.1524) linear=(28.3742,-95.7359) model=55.35km  linear=0.58km
+      [3] actual=(28.3751,-95.7450) pred=(28.6642,-96.3245) linear=(28.3707,-95.7385) model=65.10km  linear=0.81km
+      [4] actual=(28.3730,-95.7487) pred=(28.6642,-96.2815) linear=(28.3671,-95.7411) model=61.30km  linear=0.99km
+
+
+FEATURE-LEVEL ANALYSIS (averaged over all gap pings)
+----------------------------------------
+  lat           MAE=0.07373  bias=+0.06202  act_mean=0.698  pred_mean=0.760
+  lon           MAE=0.03702  bias=+0.00594  act_mean=0.310  pred_mean=0.316
+  sog           MAE=0.35020  bias=-0.35012  act_mean=0.445  pred_mean=0.095
+  cog_sin       MAE=0.55087  bias=+0.21347  act_mean=-0.101  pred_mean=0.113
+  cog_cos       MAE=0.59837  bias=+0.40679  act_mean=-0.403  pred_mean=0.004
+  hdg_sin       MAE=0.56818  bias=+0.18275  act_mean=-0.093  pred_mean=0.090
+  hdg_cos       MAE=0.73322  bias=+0.66206  act_mean=-0.407  pred_mean=0.255
+  delta_t       MAE=0.02171  bias=-0.00086  act_mean=0.029  pred_mean=0.028
+
+
+ERROR VS GAP POSITION (does error grow toward gap center?)
+----------------------------------------
+  gap frac [0.0-0.2]  n=  192  mean=119.78 km  median=72.43 km
+  gap frac [0.2-0.4]  n=  190  mean=132.44 km  median=91.80 km
+  gap frac [0.4-0.6]  n=  189  mean=143.55 km  median=113.84 km
+  gap frac [0.6-0.8]  n=  190  mean=147.98 km  median=135.11 km
+  gap frac [0.8-1.0]  n=  186  mean=175.90 km  median=164.43 km
+
+
+GUIDELINES FOR NEXT STEPS
+----------------------------------------
+  !! Model is WORSE than linear interpolation (ratio > 1.5).
+     Likely causes: too few epochs, wrong masking, cheat-through leak.
+
+========================================================================

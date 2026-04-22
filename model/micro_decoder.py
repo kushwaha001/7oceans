@@ -35,17 +35,18 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from mamba_ssm import Mamba2
+from typing import Optional
 from torch import Tensor
 
 
 class MicroEncoder(nn.Module):
     """
-    Component 3 of HB-Mamba v2.0 — Micro Encoder.
+    Component 3 of HB-Mamba v2.1 — Micro Encoder.
 
     Runs n_layers bidirectional Mamba2 blocks over the macro-conditioned
-    ping sequence.  Intermediate layers sum forward + backward outputs and
-    pass the combined tensor to the next layer.  The final layer keeps
-    h_fwd and h_bwd separate so the loss heads can use them independently.
+    ping sequence.  Intermediate layers keep forward and backward streams
+    SEPARATE (v2.1 fix — no bidirectional contamination).  The final layer
+    keeps h_fwd and h_bwd separate so the loss heads can use them independently.
 
     Parameters
     ----------
@@ -95,7 +96,7 @@ class MicroEncoder(nn.Module):
         ])
 
     # -------------------------------------------------------------------------
-    def forward(self, x_conditioned: Tensor):
+    def forward(self, x_conditioned: Tensor, visibility_mask: Optional[Tensor] = None):
         """
         Forward pass.
 
@@ -104,58 +105,46 @@ class MicroEncoder(nn.Module):
         x_conditioned : Tensor[B, N_day, d_model]
             Macro-conditioned ping sequence from CrossScaleInjection.
             N_day varies per sample and per batch — never hardcoded.
+        visibility_mask : Tensor[B, N_day] bool, optional
+            True = position is VISIBLE (not gap, not padded).
+            If provided, H is computed only over visible positions (Fix 7).
+            If None, H is mean over all positions (v2.0 fallback behaviour).
 
         Returns
         -------
         h_fwd : Tensor[B, N_day, d_model]
             Forward hidden states from the final Mamba2 layer.
-            Used by Loss Head 1 (concat with h_bwd) and Loss Head 2 (alone).
         h_bwd : Tensor[B, N_day, d_model]
             Backward hidden states from the final Mamba2 layer.
-            Used by Loss Head 1 (concat with h_fwd).
         H : Tensor[B, d_model]
-            Trajectory embedding — mean pool of (h_fwd + h_bwd) over N_day.
-            Mean pool is used (not last token) because the sequence is
-            temporal and every ping contributes equally to the vessel summary.
-            Used by Loss Head 3 (contrastive) and Loss Head 4 (alignment).
+            Trajectory embedding — mean pool of (h_fwd + h_bwd) over visible
+            positions (v2.1) or all positions (v2.0 fallback).
         """
-        x = x_conditioned   # [B, N_day, d_model]
+        # ── v2.1: Keep forward and backward streams SEPARATE in intermediate
+        # layers to prevent bidirectional contamination of h_fwd ──────────────
+        x_fwd = x_conditioned   # [B, N_day, d_model]
+        x_bwd = x_conditioned   # separate stream — DO NOT MIX
 
         # ── Intermediate layers (0 … n_layers-2) ─────────────────────────────
-        # Each layer runs fwd + bwd Mamba2, sums the outputs, and passes the
-        # combined tensor forward.  Summing keeps dimension at d_model
-        # throughout (no expansion).
         for i in range(self.n_layers - 1):
-            # Forward direction: left → right along the ping sequence
-            y_fwd = self.mamba_fwd[i](x)                          # [B, N_day, d_model]
-
-            # Backward direction: flip sequence, run Mamba2, flip back
-            # Flipping lets a standard causal Mamba2 operate right → left;
-            # the second flip restores the original temporal ordering.
-            y_bwd = self.mamba_bwd[i](x.flip(dims=[1])).flip(dims=[1])   # [B, N_day, d_model]
-
-            # Sum (not concatenate) to keep d_model constant across layers.
-            # The model learns to specialise fwd/bwd channels independently.
-            x = y_fwd + y_bwd   # [B, N_day, d_model]
+            x_fwd = self.mamba_fwd[i](x_fwd)                                    # [B, N_day, d_model]
+            x_bwd = self.mamba_bwd[i](x_bwd.flip(dims=[1])).flip(dims=[1])      # [B, N_day, d_model]
+            # DO NOT sum here — keep streams separate (v2.1 Fix 2)
 
         # ── Final layer (n_layers-1) — keep h_fwd and h_bwd separate ─────────
-        # Loss Head 1 needs both independently:
-        #   concat([h_fwd_t, h_bwd_t]) → [B, N_day, 2×d_model]   for reconstruction
-        # Loss Head 2 needs h_fwd only (causal — predicting future pings):
-        #   h_fwd_t → [B, N_day, d_model]                         for next-ping
-        last = self.n_layers - 1
-        h_fwd = self.mamba_fwd[last](x)                                   # [B, N_day, d_model]
-        h_bwd = self.mamba_bwd[last](x.flip(dims=[1])).flip(dims=[1])     # [B, N_day, d_model]
+        last  = self.n_layers - 1
+        h_fwd = self.mamba_fwd[last](x_fwd)                                     # [B, N_day, d_model]
+        h_bwd = self.mamba_bwd[last](x_bwd.flip(dims=[1])).flip(dims=[1])       # [B, N_day, d_model]
 
         # ── Trajectory embedding H ────────────────────────────────────────────
-        # Mean pool over the N_day dimension of the combined bidirectional output.
-        # Every ping position is equally weighted — appropriate for a spatial
-        # summary of a full-day trajectory (no positional priority).
-        #
-        # v2.0 change: v1.0 used the final hidden state h_{N_p}. Mean pool is
-        # more robust because early pings are as informative as late ones, and
-        # it is unaffected by trajectory length (N_day varies per vessel).
-        H = (h_fwd + h_bwd).mean(dim=1)   # [B, d_model]
+        # v2.1 Fix 7: compute H from VISIBLE positions only (exclude gap + pad).
+        if visibility_mask is not None:
+            vis = visibility_mask.unsqueeze(-1).float()   # [B, N_day, 1]
+            combined = (h_fwd + h_bwd) * vis              # zero out gap/pad positions
+            n_vis = vis.sum(dim=1).clamp(min=1)            # [B, 1]
+            H = combined.sum(dim=1) / n_vis                # [B, d_model]
+        else:
+            H = (h_fwd + h_bwd).mean(dim=1)               # v2.0 fallback
 
         return h_fwd, h_bwd, H
 

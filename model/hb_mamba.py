@@ -176,38 +176,52 @@ class HBMamba(nn.Module):
 
     def forward(
         self,
-        macro_features : Tensor,      # [B, N_cells, d_macro]
-        macro_lat_idx  : Tensor,      # [B, N_cells]  int
-        macro_lon_idx  : Tensor,      # [B, N_cells]  int
-        micro_tokens   : Tensor,      # [B, N_day, d_micro]  zero-padded
-        mask           : Tensor,      # [B, N_day]  bool  True=masked ping
-        padding_mask   : Tensor,      # [B, N_day]  bool  True=padded position
-        mmsi           : List[int],   # [B]  vessel identifiers
+        macro_features      : Tensor,                # [B, N_cells, d_macro]
+        macro_lat_idx       : Tensor,                # [B, N_cells]  int
+        macro_lon_idx       : Tensor,                # [B, N_cells]  int
+        micro_tokens        : Tensor,                # [B, N_day, d_micro]  FULL original (loss target)
+        mask                : Tensor,                # [B, N_day]  bool  True=masked ping
+        padding_mask        : Tensor,                # [B, N_day]  bool  True=padded position
+        mmsi                : List[int],             # [B]  vessel identifiers
+        micro_tokens_masked : Optional[Tensor] = None,  # [B, N_day, d_micro]  gap-zeroed (encoder input)
     ) -> Dict[str, Tensor]:
         """
         Full forward pass — training mode.
+
+        v2.1 change: accepts optional micro_tokens_masked. When provided,
+        the encoder sees the masked version (gap positions zeroed) while
+        the loss heads use the full micro_tokens as reconstruction target.
+        When None (v2.0 fallback), micro_tokens is used for both.
 
         Returns
         -------
         dict with keys:
             L_mask, L_next, L_contrast, L_align, L_total
         """
+        # v2.1: use masked version for encoder, full version for loss target
+        encoder_input = micro_tokens_masked if micro_tokens_masked is not None else micro_tokens
+
         # Component 1 — Macro context
         macro_output, _ = self.macro_encoder(
             macro_features, macro_lat_idx, macro_lon_idx
         )   # [B, N_cells, d_model]
 
-        # Component 2 — Cross-scale injection
+        # Component 2 — Cross-scale injection (uses masked input)
+        # v2.2: pass mask so CSI adds the [MASK] token embedding at masked
+        # positions; combined with sinusoidal PE this makes Q unique per
+        # position even when features are zeroed.
         x_conditioned, attn_weights, topk_idx = self.cross_scale(
-            micro_tokens, macro_output
+            encoder_input, macro_output, mask=mask
         )   # [B, N_day, d_model]
 
         # Component 3 — Micro encoding
-        h_fwd, h_bwd, H = self.micro_encoder(x_conditioned)
+        # v2.1: pass visibility_mask so H excludes gap + padded positions
+        visibility_mask = ~mask & ~padding_mask   # True = visible (not gap, not padded)
+        h_fwd, h_bwd, H = self.micro_encoder(x_conditioned, visibility_mask=visibility_mask)
         # h_fwd, h_bwd : [B, N_day, d_model]
         # H            : [B, d_model]
 
-        # Component 4 — Loss heads
+        # Component 4 — Loss heads (uses FULL micro_tokens as target)
         losses = self.loss_heads(
             h_fwd, h_bwd, H,
             macro_output, attn_weights, topk_idx,
@@ -226,6 +240,7 @@ class HBMamba(nn.Module):
         macro_lon_idx  : Tensor,
         micro_tokens   : Tensor,
         padding_mask   : Optional[Tensor] = None,
+        mask           : Optional[Tensor] = None,
     ) -> Dict[str, Tensor]:
         """
         Inference-only forward — returns hidden states and embeddings, no loss.
@@ -235,8 +250,11 @@ class HBMamba(nn.Module):
         macro_features : [B, N_cells, d_macro]
         macro_lat_idx  : [B, N_cells]
         macro_lon_idx  : [B, N_cells]
-        micro_tokens   : [B, N_day, d_micro]
+        micro_tokens   : [B, N_day, d_micro]  — caller is responsible for zeroing
+                         gap positions if using v2.1 (pass micro_tokens_masked here).
         padding_mask   : [B, N_day]  bool, optional
+        mask           : [B, N_day]  bool, optional — if provided, used with
+                         padding_mask to compute H from visible positions only.
 
         Returns
         -------
@@ -252,9 +270,18 @@ class HBMamba(nn.Module):
             macro_features, macro_lat_idx, macro_lon_idx
         )
         x_cond, attn_weights, topk_idx = self.cross_scale(
-            micro_tokens, macro_output
+            micro_tokens, macro_output, mask=mask
         )
-        h_fwd, h_bwd, H = self.micro_encoder(x_cond)
+
+        # v2.1: compute visibility mask for H if mask is provided
+        visibility_mask = None
+        if mask is not None:
+            if padding_mask is not None:
+                visibility_mask = ~mask & ~padding_mask
+            else:
+                visibility_mask = ~mask
+
+        h_fwd, h_bwd, H = self.micro_encoder(x_cond, visibility_mask=visibility_mask)
 
         return {
             "macro_output" : macro_output,

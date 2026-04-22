@@ -18,7 +18,7 @@ Training config (from architecture spec):
     Batch size      64 per GPU  (128 effective across 2 GPUs)
     Grad accum      4 steps  → effective batch 256 / GPU
     Mixed precision bfloat16
-    Grad clip       1.0
+    Grad clip       2.0   (with skip-step guard at |grad| > 100)
     Epochs          30–40
 
 DDP note:
@@ -66,16 +66,17 @@ class TrainerConfig:
     log_every      : int   Print train metrics every N optimizer steps.
     save_every     : int   Always save a checkpoint every N epochs (on top of best-val).
     """
-    checkpoint_dir : str   = "checkpoints"
-    lr             : float = 1e-4
-    weight_decay   : float = 0.01
-    max_epochs     : int   = 40
-    warmup_frac    : float = 0.05
-    grad_clip      : float = 1.0
-    grad_accum     : int   = 4
-    use_amp        : bool  = True
-    log_every      : int   = 10
-    save_every     : int   = 5
+    checkpoint_dir      : str   = "checkpoints"
+    lr                  : float = 1e-4
+    weight_decay        : float = 0.01
+    max_epochs          : int   = 40
+    warmup_frac         : float = 0.05
+    grad_clip           : float = 2.0
+    skip_grad_threshold : float = 100.0
+    grad_accum          : int   = 4
+    use_amp             : bool  = True
+    log_every           : int   = 10
+    save_every          : int   = 5
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +160,10 @@ class Trainer:
 
     def _forward(self, batch: Dict) -> Dict[str, torch.Tensor]:
         """Single forward pass; returns loss dict."""
+        # CRITICAL: pass micro_tokens_masked so the encoder sees zeros at gap
+        # positions (as at inference). Omitting this lets the model cheat by
+        # reading ground-truth at "masked" positions during training → training
+        # loss collapses to ~0 via copy-through but inference is pure noise.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.cfg.use_amp):
             return self.model(
                 batch["macro_features"],
@@ -168,6 +173,7 @@ class Trainer:
                 batch["mask"],
                 batch["padding_mask"],
                 batch["mmsi"],
+                batch.get("micro_tokens_masked"),
             )
 
     @staticmethod
@@ -179,9 +185,10 @@ class Trainer:
 
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        accum   = defaultdict(float)   # loss accumulator for logging
-        n_log   = 0
-        t0      = time.time()
+        accum    = defaultdict(float)   # loss accumulator for logging
+        n_log    = 0
+        skipped  = 0                    # steps skipped this log window
+        t0       = time.time()
 
         self.optimizer.zero_grad()
 
@@ -204,10 +211,26 @@ class Trainer:
             is_last_batch = (batch_idx + 1 == len(self.train_loader))
 
             if is_accum_step or is_last_batch:
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-                self.optimizer.step()
+                # clip_grad_norm_ returns the pre-clip total norm — use it to
+                # detect and reject pathological gradient spikes that would
+                # otherwise corrupt Adam's running moments.
+                gn = nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.cfg.grad_clip
+                )
+                gn_val = gn.item() if torch.is_tensor(gn) else float(gn)
+
+                if (not math.isfinite(gn_val)) or gn_val > self.cfg.skip_grad_threshold:
+                    # Spike or NaN — drop this update entirely.
+                    self.optimizer.zero_grad()
+                    skipped += 1
+                else:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+                # Advance the schedule even on skipped steps so warmup/cosine
+                # shape stays tied to wall-clock progress rather than to how
+                # many updates were accepted.
                 self.scheduler.step()
-                self.optimizer.zero_grad()
                 self.global_step += 1
 
                 if self.global_step % self.cfg.log_every == 0:
@@ -216,12 +239,13 @@ class Trainer:
                     elapsed = time.time() - t0
                     print(
                         f"  epoch {epoch:3d}  step {self.global_step:6d}"
-                        f"  lr={lr:.2e}  {self._fmt_losses(avg, '')}  "
-                        f"({elapsed:.1f}s)"
+                        f"  lr={lr:.2e}  gn={gn_val:.2f}  skip={skipped}"
+                        f"  {self._fmt_losses(avg, '')}  ({elapsed:.1f}s)"
                     )
-                    accum = defaultdict(float)
-                    n_log = 0
-                    t0    = time.time()
+                    accum   = defaultdict(float)
+                    n_log   = 0
+                    skipped = 0
+                    t0      = time.time()
 
         return {k: v / max(1, n_log) for k, v in accum.items()}
 

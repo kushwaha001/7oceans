@@ -70,13 +70,14 @@ loaders = build_dataloaders(
 
 raw_batch = next(iter(loaders["train"]))
 
-macro_features = raw_batch["macro_features"].to(device)
-macro_lat_idx  = raw_batch["macro_lat_idx"].to(device)
-macro_lon_idx  = raw_batch["macro_lon_idx"].to(device)
-micro_tokens   = raw_batch["micro_tokens"].to(device)
-mask           = raw_batch["mask"].to(device)
-padding_mask   = raw_batch["padding_mask"].to(device)
-mmsi           = raw_batch["mmsi"]
+macro_features      = raw_batch["macro_features"].to(device)
+macro_lat_idx       = raw_batch["macro_lat_idx"].to(device)
+macro_lon_idx       = raw_batch["macro_lon_idx"].to(device)
+micro_tokens        = raw_batch["micro_tokens"].to(device)
+micro_tokens_masked = raw_batch["micro_tokens_masked"].to(device)
+mask                = raw_batch["mask"].to(device)
+padding_mask        = raw_batch["padding_mask"].to(device)
+mmsi                = raw_batch["mmsi"]
 
 B       = macro_features.shape[0]
 n_day   = raw_batch["n_day"].tolist()
@@ -118,6 +119,7 @@ for step in range(N_STEPS):
         losses = model(
             macro_features, macro_lat_idx, macro_lon_idx,
             micro_tokens, mask, padding_mask, mmsi,
+            micro_tokens_masked,
         )
 
     L = losses["L_total"]

@@ -1,0 +1,15 @@
+# Single checkpoint — 6 long paths, min 200 km traveled                                                                                                                                                  
+  CUDA_VISIBLE_DEVICES=1 python visualize_trajectory_comparison.py \                                                                                                                                       
+    --checkpoint checkpoints_old/best.pt \                                                                                                                                                                 
+    --split val \                                                                                                                                                                                          
+    --n_samples 6 \                                                                                                                                                                                        
+    --min_dist_km 200 \                                                                                                                                                                                  
+    --min_pings 50 \                                                                                                                                                                                       
+    --output figs/old_model                                                                                                                                                                              
+                                                                                                                                                                                                           
+  # Compare old vs new once new model trains
+  CUDA_VISIBLE_DEVICES=1 python visualize_trajectory_comparison.py \                                                                                                                                       
+    --checkpoint checkpoints/best.pt \                                                                                                                                                                   
+    --checkpoint2 checkpoints_old/best.pt \
+    --split val --n_samples 4 --min_dist_km 200 \
+    --output figs/comparison 

@@ -50,8 +50,10 @@ v1.0 → v2.0 changes
           saved attention weights to build a vessel-specific Z (L_align).
 """
 
+import math
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -74,9 +76,10 @@ class CrossScaleInjection(nn.Module):
 
     def __init__(
         self,
-        d_micro : int = 11,
-        d_model : int = 256,
-        K       : int = 32,
+        d_micro     : int = 11,
+        d_model     : int = 256,
+        K           : int = 32,
+        max_pos_len : int = 2048,
     ) -> None:
         super().__init__()
 
@@ -88,10 +91,20 @@ class CrossScaleInjection(nn.Module):
         # Micro input projection: 11 → d_model
         self.micro_proj = nn.Linear(d_micro, d_model)
 
+        # v2.2 — Positional encoding + MASK token to disambiguate masked positions.
+        # Fixes the core bug: masked positions had all-zero features → identical
+        # Q across the gap → identical attention → identical x_conditioned →
+        # model could only predict the mean.
+        self.register_buffer(
+            "pos_encoding",
+            self._build_sinusoidal_pe(max_pos_len, d_model),
+            persistent=False,
+        )
+        self.mask_token = nn.Parameter(torch.randn(d_model) * 0.02)
+
         # Q: from micro stream (what each ping is looking for)
         # K: from macro output (what each cell offers — used to SCORE cells)
         # V: from macro output (content to inject after selection)
-        # No bias — standard cross-attention convention
         self.W_Q = nn.Linear(d_model, d_model, bias=False)
         self.W_K = nn.Linear(d_model, d_model, bias=False)
         self.W_V = nn.Linear(d_model, d_model, bias=False)
@@ -99,17 +112,32 @@ class CrossScaleInjection(nn.Module):
         # Output projection before residual add
         self.out_proj = nn.Linear(d_model, d_model)
 
+    @staticmethod
+    def _build_sinusoidal_pe(N: int, d: int) -> Tensor:
+        """Standard transformer sinusoidal positional encoding, [N, d]."""
+        pos = torch.arange(N, dtype=torch.float32).unsqueeze(1)           # [N, 1]
+        div = torch.exp(torch.arange(0, d, 2, dtype=torch.float32)
+                        * -(math.log(10000.0) / d))                       # [d/2]
+        pe = torch.zeros(N, d, dtype=torch.float32)
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        return pe
+
     # -------------------------------------------------------------------------
     def forward(
         self,
-        micro_tokens : Tensor,   # [B, N_day, d_micro]
-        macro_output : Tensor,   # [B, N_cells, d_model]  from MacroEncoder
+        micro_tokens : Tensor,              # [B, N_day, d_micro]
+        macro_output : Tensor,              # [B, N_cells, d_model]  from MacroEncoder
+        mask         : Optional[Tensor] = None,  # [B, N_day] bool  True=masked ping
     ):
         """
         Parameters
         ----------
         micro_tokens : Tensor[B, N_day, d_micro]
         macro_output : Tensor[B, N_cells, d_model]
+        mask         : BoolTensor[B, N_day] or None
+            True = this ping is masked. Used to add the [MASK] token embedding
+            so the model can distinguish masked positions from zero-content ones.
 
         Returns
         -------
@@ -120,8 +148,26 @@ class CrossScaleInjection(nn.Module):
         B, N_day, _   = micro_tokens.shape
         _, N_cells, _ = macro_output.shape
 
-        # ── Step 1 — Micro input projection ───────────────────────────────────
+        # ── Step 1 — Micro input projection + positional/mask signal ─────────
         x_micro = self.micro_proj(micro_tokens)   # [B, N_day, d_model]
+
+        # v2.2 Fix: inject sinusoidal position encoding so masked positions
+        # carry a position-unique signal (otherwise Q(zeros)=0 for every gap
+        # ping, collapsing all queries to the same vector).
+        if N_day > self.pos_encoding.shape[0]:
+            # Rebuild PE if a longer sequence ever appears (rare, e.g. a freak
+            # vessel-day). Cheap — N_day × d_model floats on the fly.
+            pe = self._build_sinusoidal_pe(N_day, self.d_model).to(
+                device=x_micro.device, dtype=x_micro.dtype)
+        else:
+            pe = self.pos_encoding[:N_day].to(x_micro.dtype)
+        x_micro = x_micro + pe.unsqueeze(0)                              # [B, N_day, d_model]
+
+        # Add the learned [MASK] embedding at masked positions.
+        if mask is not None:
+            mask_contrib = self.mask_token.to(x_micro.dtype).view(1, 1, -1) \
+                           * mask.unsqueeze(-1).to(x_micro.dtype)
+            x_micro = x_micro + mask_contrib
 
         # ── Step 2 — Q/K projections + full score matrix ──────────────────────
         Q      = self.W_Q(x_micro)                                    # [B, N_day,   d_model]
